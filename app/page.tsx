@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Boxes, ChartNoAxesCombined, Download, FileSpreadsheet, LayoutDashboard, PackageCheck, Plus, RotateCcw, ShoppingBag, Trash2 } from "lucide-react";
+import { Boxes, ChartNoAxesCombined, Download, FileSpreadsheet, LayoutDashboard, Menu, PackageCheck, Plus, RotateCcw, ShoppingBag, Trash2, X } from "lucide-react";
 import { Sidebar, SidebarProvider } from "@/components/ui/sidebar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -56,6 +56,7 @@ function totals(rows: Movement[]) {
 
 export default function Home() {
   const [section,setSection] = useState<Section>("overview");
+  const [menuOpen,setMenuOpen] = useState(false);
   const [ledger,setLedger] = useState<Ledger>(empty);
   const [loading,setLoading] = useState(true);
   const [loadError,setLoadError] = useState("");
@@ -66,6 +67,13 @@ export default function Home() {
   const [returned,setReturned] = useState({ productId:"", quantity:"", date:dateToday(), note:"" });
   const [from,setFrom] = useState(dateMonthStart());
   const [to,setTo] = useState(dateToday());
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setMenuOpen(false); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [menuOpen]);
 
   const load = useCallback(async () => {
     setLoadError("");
@@ -204,7 +212,19 @@ export default function Home() {
       <div className="sidebar-foot">كل أرقامك في مكان واحد</div>
     </Sidebar>
     <main className="main-content">
-      <header className="topbar"><div className="mobile-brand">دفتر المبيعات</div><div className="topbar-date">إدارة يومية واضحة لمبيعاتك</div></header>
+      <header className="topbar">
+        <div className="mobile-brand">دفتر المبيعات</div>
+        <div className="topbar-date">إدارة يومية واضحة لمبيعاتك</div>
+        <button type="button" className="mobile-menu-toggle" aria-label={menuOpen ? "إغلاق القائمة" : "فتح القائمة"} aria-expanded={menuOpen} aria-controls="mobile-navigation" onClick={()=>setMenuOpen(open=>!open)}>
+          {menuOpen ? <X size={24}/> : <Menu size={24}/>}
+        </button>
+        {menuOpen && <>
+          <button type="button" className="mobile-menu-backdrop" aria-label="إغلاق القائمة" onClick={()=>setMenuOpen(false)}/>
+          <nav id="mobile-navigation" className="mobile-navigation" aria-label="القائمة الرئيسية">
+            {sections.map(({id,label,icon:Icon})=><button type="button" key={id} className="mobile-nav-link" aria-pressed={section===id} onClick={()=>{setSection(id);setMenuOpen(false)}}><Icon size={20}/><span>{label}</span></button>)}
+          </nav>
+        </>}
+      </header>
       <div className="content-wrap">
         <div className="page-heading"><div><span className="eyebrow">لوحة العمل</span><h1>{active.label}</h1><p>{section==="reports"?"حدد المدة لمراجعة الاستلام والبيع والإرجاع.":section==="sales"?"سجل الكمية المباعة واسم المتجر.":section==="returns"?"أعد من الكمية المستلمة وتابع المتبقي لكل منتج.":section==="products"?"أنشئ المنتجات هنا، ثم اخترها عند الاستلام.":section==="budget"?"تابع تكاليف البضاعة والمبيعات وصافي الربح.":"تابع المنتجات والكميات والمبالغ بسهولة."}</p></div>{section==="overview"&&<button className="primary-button" onClick={()=>setSection("receive")}><Plus size={18}/> إضافة استلام</button>}</div>
         {loadError && <div className="error-banner" role="alert">{loadError} <button onClick={()=>void load()}>إعادة المحاولة</button></div>}
