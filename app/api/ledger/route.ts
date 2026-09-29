@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { LedgerError, loadFirestoreLedger, saveFirestoreMovement } from "@/lib/firestore-admin";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +10,12 @@ const integer = (value: unknown) => Number.isSafeInteger(value) && Number(value)
 const positive = (value: unknown) => integer(value) && Number(value) > 0;
 const dateValid = (value: unknown) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value + "T00:00:00Z"));
 const safeText = (value: unknown, length: number) => typeof value === "string" ? value.trim().slice(0, length) : "";
+const firebaseSecret = () => (env as unknown as Record<string, unknown>).FIREBASE_SERVICE_ACCOUNT_JSON as string | undefined;
 
 export async function GET() {
   try {
+    const secret = firebaseSecret();
+    if (secret) return Response.json(await loadFirestoreLedger(secret), { headers: { "Cache-Control": "no-store" } });
     const [products, movements] = await Promise.all([
       env.DB!.prepare("SELECT id, name, default_cost, default_price FROM products ORDER BY name COLLATE NOCASE").all<Product>(),
       env.DB!.prepare("SELECT m.id, m.kind, m.product_id, p.name AS product_name, m.sale_id, m.quantity, m.unit_cost, m.unit_price, m.store, m.occurred_on, m.note FROM movements m JOIN products p ON p.id = m.product_id ORDER BY m.occurred_on DESC, m.id DESC").all<Movement>(),
@@ -34,6 +38,11 @@ export async function POST(request: Request) {
   if (!dateValid(occurredOn)) return error("أدخل تاريخًا صحيحًا.");
 
   try {
+    const secret = firebaseSecret();
+    if (secret) {
+      await saveFirestoreMovement(secret, body);
+      return Response.json({ ok: true }, { status: 201 });
+    }
     if (kind === "receipt") {
       const name = safeText(body.name, 100);
       const productId = Number(body.productId);
@@ -83,6 +92,7 @@ export async function POST(request: Request) {
     }
     return error("نوع العملية غير صحيح.");
   } catch (cause) {
+    if (cause instanceof LedgerError) return error(cause.message, cause.status);
     console.error("Ledger write failed", cause);
     return error("تعذر حفظ العملية. حاول مرة أخرى.", 500);
   }
