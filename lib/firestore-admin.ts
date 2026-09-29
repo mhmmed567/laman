@@ -9,7 +9,7 @@ type FireValue = { stringValue?: string; integerValue?: string; nullValue?: null
 type FireDoc = { name: string; fields?: Fields; updateTime?: string };
 type Account = { project_id: string; client_email: string; private_key: string };
 type Product = { id: number; name: string; default_cost: number; default_price: number; stock: number };
-type Movement = { id: number; kind: "receipt" | "sale" | "return"; product_id: number; product_name: string; sale_id: number | null; quantity: number; unit_cost: number; unit_price: number; store: string; occurred_on: string; note: string; returned_quantity?: number };
+type Movement = { id: number; kind: "receipt" | "sale" | "return"; product_id: number; product_name: string; receipt_id: number | null; quantity: number; unit_cost: number; unit_price: number; store: string; occurred_on: string; note: string };
 
 export class LedgerError extends Error { status: number; constructor(message: string, status = 400) { super(message); this.status = status; } }
 class FirestoreError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
@@ -60,7 +60,7 @@ const asNumber = (v?: FireValue) => Number(v?.integerValue ?? 0);
 const field = (v: string | number | null): FireValue => v === null ? { nullValue: null } : typeof v === "number" ? { integerValue: String(v) } : { stringValue: v };
 function fields(record: Record<string, string | number | null>): Fields { return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, field(value)])); }
 function product(doc: FireDoc): Product { const f = doc.fields ?? {}; return { id: asNumber(f.id), name: asString(f.name), default_cost: asNumber(f.default_cost), default_price: asNumber(f.default_price), stock: asNumber(f.stock) }; }
-function movement(doc: FireDoc): Movement { const f = doc.fields ?? {}; return { id: asNumber(f.id), kind: asString(f.kind) as Movement["kind"], product_id: asNumber(f.product_id), product_name: asString(f.product_name), sale_id: f.sale_id?.nullValue === null ? null : asNumber(f.sale_id), quantity: asNumber(f.quantity), unit_cost: asNumber(f.unit_cost), unit_price: asNumber(f.unit_price), store: asString(f.store), occurred_on: asString(f.occurred_on), note: asString(f.note), returned_quantity: asNumber(f.returned_quantity) }; }
+function movement(doc: FireDoc): Movement { const f = doc.fields ?? {}; return { id: asNumber(f.id), kind: asString(f.kind) as Movement["kind"], product_id: asNumber(f.product_id), product_name: asString(f.product_name), receipt_id: f.receipt_id?.nullValue === null || !f.receipt_id ? null : asNumber(f.receipt_id), quantity: asNumber(f.quantity), unit_cost: asNumber(f.unit_cost), unit_price: asNumber(f.unit_price), store: asString(f.store), occurred_on: asString(f.occurred_on), note: asString(f.note) }; }
 async function getDoc(secret: string, collection: string, document: number | string): Promise<FireDoc | null> {
   try { return await api<FireDoc>(secret, `/${collection}/${document}`); }
   catch (error) { if (error instanceof FirestoreError && error.status === 404) return null; throw error; }
@@ -93,6 +93,20 @@ export async function loadFirestoreLedger(secret: string) {
   return { products: products.map(product).sort((a, b) => a.name.localeCompare(b.name, "ar")), movements: movements.map(movement).sort((a, b) => b.occurred_on.localeCompare(a.occurred_on) || b.id - a.id) };
 }
 
+export async function saveFirestoreProduct(secret: string, input: { name: string; unitCost: number; unitPrice: number }) {
+  const name = text(input.name, 100);
+  if (!name || !whole(input.unitCost) || !whole(input.unitPrice)) fail("أدخل اسم المنتج وتكلفته وسعر بيعه.");
+  const productId = id();
+  const hash = await nameHash(name);
+  if (await getDoc(secret, "productNames", hash)) fail("هذا المنتج موجود بالفعل.");
+  try {
+    await commit(secret, [create(docName("productNames", hash), { product_id: productId }), create(docName("products", productId), { id: productId, name, default_cost: input.unitCost, default_price: input.unitPrice, stock: 0 })]);
+  } catch (cause) {
+    if (cause instanceof FirestoreError && cause.status === 409) fail("هذا المنتج موجود بالفعل.");
+    throw cause;
+  }
+}
+
 export async function saveFirestoreMovement(secret: string, body: Record<string, unknown>) {
   const quantity = Number(body.quantity);
   const occurred_on = body.occurredOn;
@@ -103,23 +117,15 @@ export async function saveFirestoreMovement(secret: string, body: Record<string,
   const movementName = docName("movements", movementId);
   if (body.kind === "receipt") {
     const productId = Number(body.productId);
-    const name = text(body.name, 100);
     const unit_cost = Number(body.unitCost), unit_price = Number(body.unitPrice);
     if (!whole(unit_cost) || !whole(unit_price)) fail("أدخل تكلفة وسعر بيع صحيحين.");
-    if (!name && !positive(productId)) fail("اختر منتجًا أو اكتب اسم منتج جديد.");
-    const newProductId = positive(productId) ? productId : id();
-    const movementBase = { id: movementId, kind: "receipt", product_id: newProductId, sale_id: null, quantity, unit_cost, unit_price, store: "", occurred_on: occurred_on as string, note };
+    if (!positive(productId)) fail("اختر منتجًا من صفحة المنتجات أولًا.");
+    const movementBase = { id: movementId, kind: "receipt", product_id: productId, receipt_id: null, quantity, unit_cost, unit_price, store: "", occurred_on: occurred_on as string, note };
     await retryOnConflict(async () => {
-      if (positive(productId)) {
-        const existing = await getDoc(secret, "products", productId);
-        if (!existing) fail("المنتج غير موجود.");
-        const p = product(existing!);
-        await commit(secret, [update(existing!, { default_cost: unit_cost, default_price: unit_price, stock: p.stock + quantity }), create(movementName, { ...movementBase, product_name: p.name })]);
-      } else {
-        const hash = await nameHash(name);
-        if (await getDoc(secret, "productNames", hash)) fail("هذا المنتج موجود؛ اختره من القائمة.");
-        await commit(secret, [create(docName("productNames", hash), { product_id: newProductId }), create(docName("products", newProductId), { id: newProductId, name, default_cost: unit_cost, default_price: unit_price, stock: quantity }), create(movementName, { ...movementBase, product_name: name })]);
-      }
+      const existing = await getDoc(secret, "products", productId);
+      if (!existing) fail("المنتج غير موجود.");
+      const p = product(existing!);
+      await commit(secret, [update(existing!, { default_cost: unit_cost, default_price: unit_price, stock: p.stock + quantity }), create(movementName, { ...movementBase, product_name: p.name })]);
     });
     return;
   }
@@ -133,22 +139,19 @@ export async function saveFirestoreMovement(secret: string, body: Record<string,
       if (!existing) fail("المنتج غير موجود.");
       const p = product(existing!);
       if (p.stock < quantity) fail("الكمية المطلوبة أكبر من المخزون المتوفر.");
-      await commit(secret, [update(existing!, { stock: p.stock - quantity }), create(movementName, { id: movementId, kind: "sale", product_id: productId, product_name: p.name, sale_id: null, quantity, unit_cost: p.default_cost, unit_price, store, occurred_on: occurred_on as string, note, returned_quantity: 0 })]);
+      await commit(secret, [update(existing!, { stock: p.stock - quantity }), create(movementName, { id: movementId, kind: "sale", product_id: productId, product_name: p.name, receipt_id: null, quantity, unit_cost: p.default_cost, unit_price, store, occurred_on: occurred_on as string, note })]);
     });
     return;
   }
   if (body.kind === "return") {
-    const saleId = Number(body.saleId);
-    if (!positive(saleId)) fail("اختر عملية البيع المرتبطة بالمسترجع.");
+    const productId = Number(body.productId);
+    if (!positive(productId)) fail("اختر المنتج المستلم.");
     await retryOnConflict(async () => {
-      const saleDoc = await getDoc(secret, "movements", saleId);
-      if (!saleDoc || movement(saleDoc).kind !== "sale") fail("عملية البيع غير موجودة.");
-      const sale = movement(saleDoc!);
-      if (quantity > sale.quantity - (sale.returned_quantity ?? 0)) fail("الكمية المسترجعة أكبر من المتبقي من عملية البيع.");
-      const productDoc = await getDoc(secret, "products", sale.product_id);
+      const productDoc = await getDoc(secret, "products", productId);
       if (!productDoc) fail("المنتج غير موجود.");
       const p = product(productDoc!);
-      await commit(secret, [update(saleDoc!, { returned_quantity: (sale.returned_quantity ?? 0) + quantity }), update(productDoc!, { stock: p.stock + quantity }), create(movementName, { id: movementId, kind: "return", product_id: sale.product_id, product_name: sale.product_name, sale_id: saleId, quantity, unit_cost: sale.unit_cost, unit_price: sale.unit_price, store: sale.store, occurred_on: occurred_on as string, note })]);
+      if (quantity > p.stock) fail("الكمية المسترجعة أكبر من الكمية المتبقية في المخزون.");
+      await commit(secret, [update(productDoc!, { stock: p.stock - quantity }), create(movementName, { id: movementId, kind: "return", product_id: productId, product_name: p.name, receipt_id: null, quantity, unit_cost: p.default_cost, unit_price: 0, store: "", occurred_on: occurred_on as string, note })]);
     });
     return;
   }
