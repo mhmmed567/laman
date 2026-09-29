@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { LedgerError, loadFirestoreLedger, saveFirestoreMovement, saveFirestoreProduct } from "@/lib/firestore-admin";
+import { LedgerError, deleteFirestoreProduct, loadFirestoreLedger, saveFirestoreMovement, saveFirestoreProduct } from "@/lib/firestore-admin";
 
 export const dynamic = "force-dynamic";
 
@@ -108,6 +108,31 @@ export async function POST(request: Request) {
     if (cause instanceof LedgerError) return error(cause.message, cause.status);
     console.error("Ledger write failed", cause);
     return error("تعذر حفظ العملية. حاول مرة أخرى.", 500);
+  }
+}
+
+export async function DELETE(request: Request) {
+  let body: Record<string, unknown>;
+  try { body = await request.json() as Record<string, unknown>; } catch { return error("البيانات غير صالحة."); }
+  const productId = Number(body.productId);
+  const expectedName = safeText(body.expectedName, 100);
+  if (!positive(productId) || !expectedName) return error("حدد المنتج الذي تريد حذفه.");
+  try {
+    const secret = firebaseSecret();
+    if (secret) await deleteFirestoreProduct(secret, productId, expectedName);
+    else {
+      const existing = await env.DB!.prepare("SELECT name FROM products WHERE id = ?").bind(productId).first<{ name: string }>();
+      if (!existing || existing.name !== expectedName) return error("تغيّر المنتج أو لم يعد موجودًا. حدّث الصفحة ثم حاول مرة أخرى.", 409);
+      await env.DB!.batch([
+        env.DB!.prepare("DELETE FROM movements WHERE product_id = ?").bind(productId),
+        env.DB!.prepare("DELETE FROM products WHERE id = ? AND name = ?").bind(productId, expectedName),
+      ]);
+    }
+    return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+  } catch (cause) {
+    if (cause instanceof LedgerError) return error(cause.message, cause.status);
+    console.error("Product deletion failed", cause);
+    return error("تعذر حذف المنتج وعملياته. حاول مرة أخرى.", 500);
   }
 }
 

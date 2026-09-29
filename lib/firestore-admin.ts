@@ -76,9 +76,10 @@ async function listDocs(secret: string, collection: string): Promise<FireDoc[]> 
   } while (pageToken);
   return documents;
 }
-type Write = { update: { name: string; fields: Fields }; currentDocument: { exists?: boolean; updateTime?: string } };
+type Write = { update: { name: string; fields: Fields }; currentDocument: { exists?: boolean; updateTime?: string } } | { delete: string; currentDocument: { updateTime?: string } };
 const create = (name: string, data: Record<string, string | number | null>): Write => ({ update: { name, fields: fields(data) }, currentDocument: { exists: false } });
 const update = (doc: FireDoc, data: Record<string, string | number | null>): Write => ({ update: { name: doc.name, fields: { ...doc.fields, ...fields(data) } }, currentDocument: { updateTime: doc.updateTime } });
+const remove = (doc: FireDoc): Write => ({ delete: doc.name, currentDocument: { updateTime: doc.updateTime } });
 async function commit(secret: string, writes: Write[]) { await api(secret, ":commit", { method: "POST", body: JSON.stringify({ writes }) }); }
 async function retryOnConflict(work: () => Promise<void>) {
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -103,6 +104,19 @@ export async function saveFirestoreProduct(secret: string, input: { name: string
     await commit(secret, [create(docName("productNames", hash), { product_id: productId }), create(docName("products", productId), { id: productId, name, default_cost: input.unitCost, default_price: input.unitPrice, stock: 0 })]);
   } catch (cause) {
     if (cause instanceof FirestoreError && cause.status === 409) fail("هذا المنتج موجود بالفعل.");
+    throw cause;
+  }
+}
+
+export async function deleteFirestoreProduct(secret: string, productId: number, expectedName: string) {
+  const existing = await getDoc(secret, "products", productId);
+  if (!existing || product(existing).name !== expectedName) throw new LedgerError("تغيّر المنتج أو لم يعد موجودًا. حدّث الصفحة ثم حاول مرة أخرى.", 409);
+  const related = (await listDocs(secret, "movements")).filter(doc => movement(doc).product_id === productId);
+  const index = await getDoc(secret, "productNames", await nameHash(expectedName));
+  if (related.length + 1 + (index ? 1 : 0) > 500) throw new LedgerError("هذا المنتج له عمليات كثيرة. تواصل مع الدعم لحذفه بأمان.", 409);
+  try { await commit(secret, [...related.map(remove), remove(existing), ...(index ? [remove(index)] : [])]); }
+  catch (cause) {
+    if (cause instanceof FirestoreError && (cause.status === 409 || cause.status === 412)) throw new LedgerError("تغيّرت بيانات المنتج. حدّث الصفحة ثم حاول مرة أخرى.", 409);
     throw cause;
   }
 }

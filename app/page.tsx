@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Boxes, ChartNoAxesCombined, Download, FileSpreadsheet, LayoutDashboard, PackageCheck, Plus, RotateCcw, ShoppingBag } from "lucide-react";
+import { Boxes, ChartNoAxesCombined, Download, FileSpreadsheet, LayoutDashboard, PackageCheck, Plus, RotateCcw, ShoppingBag, Trash2 } from "lucide-react";
 import { Sidebar, SidebarProvider } from "@/components/ui/sidebar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -136,6 +136,22 @@ export default function Home() {
     const received=count("receipt"), sold=count("sale"), returned=count("return");
     return {received,sold,returned,remaining:received-sold-returned};
   };
+
+  const removeProduct = async (product:Product) => {
+    if (!window.confirm(`حذف «${product.name}» نهائيًا؟ ستُحذف أيضًا كل عمليات الاستلام والبيع والإرجاع المرتبطة به من التقارير والميزانية.`)) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/ledger", { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({productId:product.id,expectedName:product.name}) });
+      const data = await response.json() as { error?:string };
+      if (!response.ok) throw new Error(data.error || "تعذر حذف المنتج.");
+      setReceipt(r=>r.productId===String(product.id)?{...r,productId:"",quantity:"",cost:"",price:""}:r);
+      setSale(s=>s.productId===String(product.id)?{...s,productId:"",quantity:"",price:""}:s);
+      setReturned(r=>r.productId===String(product.id)?{...r,productId:"",quantity:""}:r);
+      await load();
+      toast.success("تم حذف المنتج وعملياته");
+    } catch (cause) { toast.error(cause instanceof Error ? cause.message : "تعذر حذف المنتج."); }
+    finally { setBusy(false); }
+  };
   const periodRows = ledger.movements.filter(r=>r.occurred_on>=from && r.occurred_on<=to);
   const period = totals(periodRows);
   const reportBalances = ledger.products.map(p=>({name:p.name,...balance(p.id,periodRows),closing:balance(p.id,ledger.movements.filter(r=>r.occurred_on<=to)).remaining})).filter(p=>p.received||p.sold||p.returned||p.closing);
@@ -199,10 +215,10 @@ export default function Home() {
           <section className="workspace-panel gap-top"><div className="panel-head"><h2>آخر العمليات</h2></div><MovementTable rows={ledger.movements.slice(0,6)} emptyText="ستظهر عمليات الاستلام والبيع والمسترجعات هنا."/></section>
         </>}
         {section==="products" && <div className="two-column"><section className="workspace-panel"><div className="panel-head"><h2>إضافة منتج</h2><Plus size={24}/></div><form className="entry-form" onSubmit={onProduct}>
-          <Field label="اسم المنتج"><input required maxLength={100} value={newProduct.name} onChange={e=>setNewProduct({...newProduct,name:e.target.value})} placeholder="مثال: بخور"/></Field>
+          <Field label="اسم المنتج"><input required maxLength={100} value={newProduct.name} onChange={e=>setNewProduct({...newProduct,name:e.target.value})} placeholder="اكتب اسم المنتج"/></Field>
           <div className="form-grid"><Field label="تكلفة الوحدة" hint="حتى ٣ خانات عشرية"><input type="number" required min="0" step="0.001" value={newProduct.cost} onChange={e=>setNewProduct({...newProduct,cost:e.target.value})}/></Field><Field label="سعر البيع المقترح"><input type="number" required min="0" step="0.001" value={newProduct.price} onChange={e=>setNewProduct({...newProduct,price:e.target.value})}/></Field></div>
           <div className="info-strip">إضافة المنتج لا تغيّر المخزون. سجّل الكمية من صفحة استلام المنتجات.</div><button className="primary-button full" disabled={submitDisabled}>حفظ المنتج</button>
-        </form></section><section className="workspace-panel"><div className="panel-head"><h2>المنتجات المسجلة</h2><span className="row-count">{ledger.products.length} منتج</span></div>{ledger.products.length?<div className="product-list">{ledger.products.map(p=><div className="product-list-item" key={p.id}><strong>{p.name}</strong><span>التكلفة {money(p.default_cost)}</span><span>سعر البيع {money(p.default_price)}</span><b>المتوفر {stock.get(p.id)||0}</b></div>)}</div>:<div className="empty-state">أضف أول منتج لتظهر قائمته هنا.</div>}</section></div>}
+        </form></section><section className="workspace-panel"><div className="panel-head"><h2>المنتجات المسجلة</h2><span className="row-count">{ledger.products.length} منتج</span></div>{ledger.products.length?<div className="product-list">{ledger.products.map(p=><div className="product-list-item" key={p.id}><strong>{p.name}</strong><span>التكلفة {money(p.default_cost)}</span><span>سعر البيع {money(p.default_price)}</span><b>المتوفر {stock.get(p.id)||0}</b><button type="button" className="delete-product" disabled={busy} onClick={()=>void removeProduct(p)} aria-label={`حذف ${p.name} وعملياته`}><Trash2 size={16}/> حذف</button></div>)}</div>:<div className="empty-state">أضف أول منتج لتظهر قائمته هنا.</div>}</section></div>}
         {section==="receive" && <div className="two-column"><section className="workspace-panel"><div className="panel-head"><h2>تسجيل استلام</h2><PackageCheck size={24}/></div><form className="entry-form" onSubmit={onReceipt}>
           <Field label="المنتج"><Select value={receipt.productId} onValueChange={v=>{const p=ledger.products.find(x=>String(x.id)===v);setReceipt(r=>({...r,productId:v,cost:p?String(p.default_cost/1000):"",price:p?String(p.default_price/1000):""}));}}><SelectTrigger className="select-control"><SelectValue placeholder="اختر منتجًا مسجلًا"/></SelectTrigger><SelectContent>{ledger.products.map(p=><SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>)}</SelectContent></Select></Field>
           {!ledger.products.length&&<div className="info-strip">أضف منتجًا من صفحة المنتجات أولًا. <button type="button" className="text-button" onClick={()=>setSection("products")}>الذهاب للمنتجات</button></div>}
